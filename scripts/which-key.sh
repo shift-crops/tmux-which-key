@@ -1,19 +1,31 @@
 #!/usr/bin/env bash
 # tmux-which-key - LazyVim-style which-key popup for tmux
-# Usage: which-key.sh [--config <path>] <pane_id>
+# Usage: which-key.sh [--config <path>] [--table <name>] <pane_id>
+#
+# The menu is built from the live tmux key bindings (tmux list-keys) so it
+# always reflects the user's real tmux configuration. An optional JSON file
+# only overrides descriptions and grouping.
 
 set -uo pipefail
 
-PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG_FILE=""
+KEY_TABLE="prefix"
 PANE_ID=""
+DUMP=0
 
-# Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --config)
             CONFIG_FILE="$2"
             shift 2
+            ;;
+        --table)
+            KEY_TABLE="$2"
+            shift 2
+            ;;
+        --dump)
+            DUMP=1
+            shift
             ;;
         *)
             PANE_ID="$1"
@@ -22,16 +34,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Resolve config file: explicit > XDG > user home > plugin default
+# Resolve override file: explicit > XDG > user home (no built-in default)
 if [[ -z "$CONFIG_FILE" ]]; then
-    local_xdg="${XDG_CONFIG_HOME:-$HOME/.config}/tmux-which-key/config.json"
-    local_home="$HOME/.tmux-which-key.json"
-    if [[ -f "$local_xdg" ]]; then
-        CONFIG_FILE="$local_xdg"
-    elif [[ -f "$local_home" ]]; then
-        CONFIG_FILE="$local_home"
-    else
-        CONFIG_FILE="$PLUGIN_DIR/configs/default.json"
+    xdg_override="${XDG_CONFIG_HOME:-$HOME/.config}/tmux-which-key/config.json"
+    home_override="$HOME/.tmux-which-key.json"
+    if [[ -f "$xdg_override" ]]; then
+        CONFIG_FILE="$xdg_override"
+    elif [[ -f "$home_override" ]]; then
+        CONFIG_FILE="$home_override"
     fi
 fi
 
@@ -43,220 +53,479 @@ C_SEP=$'\033[38;2;76;86;106m'         # #4C566A - dark gray
 C_HDR=$'\033[38;2;129;161;193m'       # #81A1C1 - blue
 C_R=$'\033[0m'
 
-if [[ -z "$PANE_ID" ]]; then
-    echo "Usage: which-key.sh [--config <path>] <pane_id>"
+if [[ -z "$PANE_ID" && $DUMP -eq 0 ]]; then
+    echo "Usage: which-key.sh [--config <path>] [--table <name>] <pane_id>"
     exit 1
 fi
 
-if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "Config not found: $CONFIG_FILE"
-    exit 1
-fi
+# Group ids in display order, with the key that opens them
+GROUP_IDS=(window pane session layout buffer misc)
+declare -A GROUP_KEYS=(
+    [window]=w [pane]=p [session]=s [layout]=l [buffer]=b [misc]=m
+)
 
-# Read entire config into memory once
-CONFIG=$(cat "$CONFIG_FILE")
-
-# Navigation stack (jq path indices)
-NAV_STACK=()
-
-# Get current items as tab-separated lines: key\ttype\tdescription\tcommand\timmediate
-# Single jq call per menu level instead of per-item
-get_current_items() {
-    local path=".items"
-    for idx in "${NAV_STACK[@]}"; do
-        path="${path}[${idx}].items"
-    done
-    echo "$CONFIG" | jq -r "${path}[] | [.key, .type, .description, (.command // \"\"), (if .immediate then \"true\" else \"false\" end)] | @tsv" 2>/dev/null
+# Map a tmux command to a group id
+group_of_command() {
+    case "$1" in
+        new-window|next-window|previous-window|select-window|rename-window|\
+kill-window|last-window|find-window|move-window|swap-window|link-window|\
+unlink-window|respawn-window|list-windows)
+            echo window ;;
+        split-window|select-pane|resize-pane|kill-pane|swap-pane|break-pane|\
+join-pane|move-pane|display-panes|last-pane|respawn-pane|pipe-pane|\
+capture-pane|rotate-window)
+            echo pane ;;
+        new-session|attach-session|detach-client|kill-session|rename-session|\
+switch-client|list-sessions|suspend-client|refresh-client|lock-client|\
+lock-server|choose-client|choose-session|choose-tree|kill-server)
+            echo session ;;
+        select-layout|next-layout|previous-layout)
+            echo layout ;;
+        copy-mode|paste-buffer|list-buffers|delete-buffer|choose-buffer|\
+show-buffer|set-buffer|save-buffer|load-buffer|clear-history)
+            echo buffer ;;
+        *)
+            echo "" ;;
+    esac
 }
 
-get_breadcrumb() {
-    local path=".items"
-    local parts=("root")
-    for idx in "${NAV_STACK[@]}"; do
-        parts+=("$(echo "$CONFIG" | jq -r "${path}[${idx}].description")")
-        path="${path}[${idx}].items"
+# Pick the group for a whole command string. Wrappers such as confirm-before
+# and command-prompt are skipped so the wrapped command decides the group.
+group_of() {
+    local cmd="$1"
+    local word group flags
+
+    case "$cmd" in
+        # A menu body mentions many commands, so classify it by what its
+        # title formats refer to instead of by the commands it contains
+        display-menu*)
+            case "$cmd" in
+                *'#{pane_'*) echo pane ;;
+                *'#{window_'*) echo window ;;
+                *'#{session_'*) echo session ;;
+                *) echo misc ;;
+            esac
+            return
+            ;;
+        # choose-tree lists windows with -w, sessions otherwise
+        choose-tree*)
+            flags="${cmd#choose-tree}"
+            flags="${flags# }"
+            flags="${flags%% *}"
+            if [[ "$flags" == -*w* ]]; then
+                echo window
+            else
+                echo session
+            fi
+            return
+            ;;
+    esac
+
+    for word in $cmd; do
+        group=$(group_of_command "$word")
+        if [[ -n "$group" ]]; then
+            echo "$group"
+            return
+        fi
     done
-    local IFS=" > "
-    echo "${parts[*]}"
+    echo misc
 }
 
-# Convert key notation to actual character
-# E.g., "C-p" -> actual Ctrl+P character
-key_to_char() {
+# tmux escapes key names such as \# and \; in list-keys output
+unescape_key() {
+    local key="$1"
+    printf '%s' "${key#\\}"
+}
+
+declare -A NOTES=() OVR_DESC=() OVR_GROUP=() HIDDEN=()
+
+load_overrides() {
+    [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local k v
+    while IFS=$'\t' read -r k v; do
+        [[ -n "$k" ]] && OVR_DESC["$k"]="$v"
+    done < <(jq -r '(.descriptions // {}) | to_entries[] | [.key, .value] | @tsv' "$CONFIG_FILE" 2>/dev/null)
+
+    while IFS=$'\t' read -r k v; do
+        [[ -n "$k" ]] && OVR_GROUP["$k"]="$v"
+    done < <(jq -r '(.groups // {}) | to_entries[] | [.key, .value] | @tsv' "$CONFIG_FILE" 2>/dev/null)
+
+    while IFS= read -r k; do
+        [[ -n "$k" ]] && HIDDEN["$k"]=1
+    done < <(jq -r '(.hide // [])[]' "$CONFIG_FILE" 2>/dev/null)
+}
+
+# Parallel arrays of the bindings in the table, in tmux's own order
+BIND_KEYS=() BIND_CMDS=() BIND_DESCS=() BIND_GROUPS=()
+
+load_bindings() {
+    local line key note
+    while IFS= read -r line; do
+        key="${line%%[[:space:]]*}"
+        note="${line#*[[:space:]]}"
+        note="${note#"${note%%[![:space:]]*}"}"
+        # A line with no note at all leaves the key itself in note
+        [[ "$note" == "$key" ]] && note=""
+        [[ -n "$key" && -n "$note" ]] && NOTES["$key"]="$note"
+    done < <(tmux list-keys -N -T "$KEY_TABLE" 2>/dev/null)
+
+    local cmd desc group
+    local re='^bind-key[[:space:]]+(-[a-zA-Z][[:space:]]+)*-T[[:space:]]+[^[:space:]]+[[:space:]]+([^[:space:]]+)[[:space:]]+(.*)$'
+    while IFS= read -r line; do
+        [[ "$line" =~ $re ]] || continue
+        key=$(unescape_key "${BASH_REMATCH[2]}")
+        cmd="${BASH_REMATCH[3]}"
+
+        [[ -n "${HIDDEN[$key]:-}" ]] && continue
+
+        desc="${OVR_DESC[$key]:-${NOTES[$key]:-$cmd}}"
+        group="${OVR_GROUP[$key]:-$(group_of "$cmd")}"
+        [[ -n "${GROUP_KEYS[$group]:-}" ]] || group=misc
+
+        BIND_KEYS+=("$key")
+        BIND_CMDS+=("$cmd")
+        BIND_DESCS+=("$desc")
+        BIND_GROUPS+=("$group")
+    done < <(tmux list-keys -T "$KEY_TABLE" 2>/dev/null)
+}
+
+# Convert a tmux key name into the token read_key produces for it
+KEY_TOKEN=""
+key_to_token() {
     local key="$1"
     case "$key" in
-        C-a) printf '\x01' ;;
-        C-b) printf '\x02' ;;
-        C-c) printf '\x03' ;;
-        C-d) printf '\x04' ;;
-        C-e) printf '\x05' ;;
-        C-f) printf '\x06' ;;
-        C-g) printf '\x07' ;;
-        C-h) printf '\x08' ;;
-        C-i) printf '\x09' ;;
-        C-j) printf '\x0a' ;;
-        C-k) printf '\x0b' ;;
-        C-l) printf '\x0c' ;;
-        C-m) printf '\x0d' ;;
-        C-n) printf '\x0e' ;;
-        C-o) printf '\x0f' ;;
-        C-p) printf '\x10' ;;
-        C-q) printf '\x11' ;;
-        C-r) printf '\x12' ;;
-        C-s) printf '\x13' ;;
-        C-t) printf '\x14' ;;
-        C-u) printf '\x15' ;;
-        C-v) printf '\x16' ;;
-        C-w) printf '\x17' ;;
-        C-x) printf '\x18' ;;
-        C-y) printf '\x19' ;;
-        C-z) printf '\x1a' ;;
-        *) printf '%s' "$key" ;;
+        C-Space) printf -v KEY_TOKEN '\x00' ;;
+        C-a) printf -v KEY_TOKEN '\x01' ;;
+        C-b) printf -v KEY_TOKEN '\x02' ;;
+        C-c) printf -v KEY_TOKEN '\x03' ;;
+        C-d) printf -v KEY_TOKEN '\x04' ;;
+        C-e) printf -v KEY_TOKEN '\x05' ;;
+        C-f) printf -v KEY_TOKEN '\x06' ;;
+        C-g) printf -v KEY_TOKEN '\x07' ;;
+        C-h) printf -v KEY_TOKEN '\x08' ;;
+        C-i) printf -v KEY_TOKEN '\x09' ;;
+        C-j) printf -v KEY_TOKEN '\x0a' ;;
+        C-k) printf -v KEY_TOKEN '\x0b' ;;
+        C-l) printf -v KEY_TOKEN '\x0c' ;;
+        C-m) printf -v KEY_TOKEN '\x0d' ;;
+        C-n) printf -v KEY_TOKEN '\x0e' ;;
+        C-o) printf -v KEY_TOKEN '\x0f' ;;
+        C-p) printf -v KEY_TOKEN '\x10' ;;
+        C-q) printf -v KEY_TOKEN '\x11' ;;
+        C-r) printf -v KEY_TOKEN '\x12' ;;
+        C-s) printf -v KEY_TOKEN '\x13' ;;
+        C-t) printf -v KEY_TOKEN '\x14' ;;
+        C-u) printf -v KEY_TOKEN '\x15' ;;
+        C-v) printf -v KEY_TOKEN '\x16' ;;
+        C-w) printf -v KEY_TOKEN '\x17' ;;
+        C-x) printf -v KEY_TOKEN '\x18' ;;
+        C-y) printf -v KEY_TOKEN '\x19' ;;
+        C-z) printf -v KEY_TOKEN '\x1a' ;;
+        Space) printf -v KEY_TOKEN ' ' ;;
+        Tab) printf -v KEY_TOKEN '\x09' ;;
+        Enter) printf -v KEY_TOKEN '\x0d' ;;
+        BSpace) printf -v KEY_TOKEN '\x7f' ;;
+        M-?) printf -v KEY_TOKEN 'M-%s' "${key#M-}" ;;
+        *) printf -v KEY_TOKEN '%s' "$key" ;;
     esac
+}
+
+# Translate a CSI/SS3 sequence into the tmux name for that key
+seq_to_name() {
+    case "$1" in
+        '[A'|'OA') echo Up ;;
+        '[B'|'OB') echo Down ;;
+        '[C'|'OC') echo Right ;;
+        '[D'|'OD') echo Left ;;
+        '[1;5A') echo C-Up ;;
+        '[1;5B') echo C-Down ;;
+        '[1;5C') echo C-Right ;;
+        '[1;5D') echo C-Left ;;
+        '[1;2A') echo S-Up ;;
+        '[1;2B') echo S-Down ;;
+        '[1;2C') echo S-Right ;;
+        '[1;2D') echo S-Left ;;
+        '[2~') echo IC ;;
+        '[3~') echo DC ;;
+        '[5~') echo PPage ;;
+        '[6~') echo NPage ;;
+        '[H'|'[1~'|'OH') echo Home ;;
+        '[F'|'[4~'|'OF') echo End ;;
+        '[Z') echo BTab ;;
+        'OP') echo F1 ;;
+        'OQ') echo F2 ;;
+        'OR') echo F3 ;;
+        'OS') echo F4 ;;
+        '[15~') echo F5 ;;
+        '[17~') echo F6 ;;
+        '[18~') echo F7 ;;
+        '[19~') echo F8 ;;
+        '[20~') echo F9 ;;
+        '[21~') echo F10 ;;
+        '[23~') echo F11 ;;
+        '[24~') echo F12 ;;
+        *) echo "" ;;
+    esac
+}
+
+# Read one keypress into KEY_TOKEN. Escape sequences become tmux key names,
+# Alt combinations become "M-<char>", everything else stays a literal byte.
+read_key() {
+    local c c2 c3 seq
+    IFS= read -rsn1 c || return 1
+
+    if [[ "$c" != $'\x1b' ]]; then
+        KEY_TOKEN="$c"
+        return 0
+    fi
+
+    if ! IFS= read -rsn1 -t 0.05 c2 || [[ -z "$c2" ]]; then
+        KEY_TOKEN="Escape"
+        return 0
+    fi
+
+    if [[ "$c2" != '[' && "$c2" != 'O' ]]; then
+        KEY_TOKEN="M-$c2"
+        return 0
+    fi
+
+    seq="$c2"
+    while IFS= read -rsn1 -t 0.05 c3 && [[ -n "$c3" ]]; do
+        seq+="$c3"
+        [[ "$c3" == [A-Za-z~] ]] && break
+    done
+    KEY_TOKEN=$(seq_to_name "$seq")
+    return 0
+}
+
+term_width() {
+    local cols
+    cols=$(tput cols 2>/dev/null)
+    [[ "$cols" =~ ^[0-9]+$ && "$cols" -gt 20 ]] || cols=100
+    echo "$cols"
+}
+
+term_height() {
+    local lines
+    lines=$(tput lines 2>/dev/null)
+    [[ "$lines" =~ ^[0-9]+$ && "$lines" -gt 6 ]] || lines=16
+    echo "$lines"
+}
+
+# Current level: empty means the group menu, otherwise a group id
+CURRENT_GROUP=""
+
+# Paging state. TOTAL_PAGES is recomputed by render_menu, which is the only
+# place that knows how many entries fit on screen.
+PAGE=0
+TOTAL_PAGES=1
+
+# Emit the entries of the current level as key\tdescription\tis_group
+current_entries() {
+    local i group count
+    if [[ -z "$CURRENT_GROUP" ]]; then
+        for group in "${GROUP_IDS[@]}"; do
+            count=0
+            for i in "${!BIND_GROUPS[@]}"; do
+                [[ "${BIND_GROUPS[$i]}" == "$group" ]] && ((count++))
+            done
+            [[ $count -gt 0 ]] || continue
+            printf '%s\t%s (%d)\t1\n' "${GROUP_KEYS[$group]}" "$group" "$count"
+        done
+    else
+        for i in "${!BIND_KEYS[@]}"; do
+            [[ "${BIND_GROUPS[$i]}" == "$CURRENT_GROUP" ]] || continue
+            printf '%s\t%s\t0\n' "${BIND_KEYS[$i]}" "${BIND_DESCS[$i]}"
+        done
+    fi
 }
 
 render_menu() {
     clear
 
-    local breadcrumb
-    breadcrumb=$(get_breadcrumb)
+    # Aim for roughly 32 column wide entries, within 1..6 columns
+    local width num_cols col_width
+    width=$(term_width)
+    num_cols=$(( (width - 2) / 32 ))
+    [[ $num_cols -lt 1 ]] && num_cols=1
+    [[ $num_cols -gt 6 ]] && num_cols=6
+    col_width=$(( (width - 2) / num_cols ))
 
-    # Header
+    local breadcrumb="$KEY_TABLE"
+    [[ -n "$CURRENT_GROUP" ]] && breadcrumb="$KEY_TABLE > $CURRENT_GROUP"
+
     printf "%s  Which Key%s  %s│%s  %s%s%s\n" "$C_HDR" "$C_R" "$C_SEP" "$C_R" "$C_DESC" "$breadcrumb" "$C_R"
-    printf "%s" "$C_SEP"
-    printf '%.0s─' {1..98}
-    printf "%s\n" "$C_R"
+    printf "%s%s%s\n" "$C_SEP" "$(printf '─%.0s' $(seq 1 $((width - 2))))" "$C_R"
 
-    # Parse all items in one jq call
-    local keys=() types=() descs=()
-    while IFS=$'\t' read -r key type desc _cmd; do
+    local keys=() descs=() groups=()
+    local key desc is_group
+    while IFS=$'\t' read -r key desc is_group; do
         keys+=("$key")
-        types+=("$type")
         descs+=("$desc")
-    done < <(get_current_items)
+        groups+=("$is_group")
+    done < <(current_entries)
 
     local total=${#keys[@]}
     if [[ $total -eq 0 ]]; then
-        printf "  %s(empty)%s\n" "$C_DESC" "$C_R"
+        TOTAL_PAGES=1
+        PAGE=0
+        printf "  %s(no bindings in %s)%s\n" "$C_DESC" "$KEY_TABLE" "$C_R"
         return
     fi
 
-    # Column layout
-    local col_width=32
-    local num_cols=3
-    local num_rows=$(( (total + num_cols - 1) / num_cols ))
+    # Two header lines and two footer lines frame the entries
+    local max_rows=$(( $(term_height) - 4 ))
+    [[ $max_rows -lt 1 ]] && max_rows=1
 
+    local per_page=$((max_rows * num_cols))
+    TOTAL_PAGES=$(( (total + per_page - 1) / per_page ))
+    [[ $PAGE -ge $TOTAL_PAGES ]] && PAGE=$((TOTAL_PAGES - 1))
+    [[ $PAGE -lt 0 ]] && PAGE=0
+
+    local first=$((PAGE * per_page))
+    local on_page=$((total - first))
+    [[ $on_page -gt $per_page ]] && on_page=$per_page
+    local num_rows=$(( (on_page + num_cols - 1) / num_cols ))
+
+    local row col i k d prefix dc avail visible_len pad
     for ((row = 0; row < num_rows; row++)); do
         printf "  "
         for ((col = 0; col < num_cols; col++)); do
-            local i=$((col * num_rows + row))
-            if [[ $i -lt $total ]]; then
-                local k="${keys[$i]}" t="${types[$i]}" d="${descs[$i]}"
-                local prefix="" dc="$C_DESC"
-                if [[ "$t" == "group" ]]; then
-                    prefix="+"
-                    dc="$C_GRP"
-                fi
-                local visible_len=$(( ${#k} + 4 + ${#prefix} + ${#d} ))
-                local pad=$((col_width - visible_len))
-                [[ $pad -lt 1 ]] && pad=1
-                printf "%s%s%s  %s→%s %s%s%s%s" "$C_KEY" "$k" "$C_R" "$C_SEP" "$C_R" "$dc" "$prefix" "$d" "$C_R"
-                printf '%*s' "$pad" ""
+            i=$((col * num_rows + row))
+            [[ $i -lt $on_page ]] || continue
+            i=$((first + i))
+            k="${keys[$i]}"
+            d="${descs[$i]}"
+            prefix=""
+            dc="$C_DESC"
+            if [[ "${groups[$i]}" == "1" ]]; then
+                prefix="+"
+                dc="$C_GRP"
             fi
+            avail=$((col_width - ${#k} - 5 - ${#prefix}))
+            [[ ${#d} -gt $avail && $avail -gt 1 ]] && d="${d:0:$((avail - 1))}…"
+            visible_len=$(( ${#k} + 4 + ${#prefix} + ${#d} ))
+            pad=$((col_width - visible_len))
+            [[ $pad -lt 1 ]] && pad=1
+            printf "%s%s%s  %s→%s %s%s%s%s" "$C_KEY" "$k" "$C_R" "$C_SEP" "$C_R" "$dc" "$prefix" "$d" "$C_R"
+            printf '%*s' "$pad" ""
         done
         printf "\n"
     done
 
-    # Footer
-    printf "\n%s" "$C_SEP"
-    printf '%.0s─' {1..98}
-    printf "%s\n" "$C_R"
-    if [[ ${#NAV_STACK[@]} -gt 0 ]]; then
-        printf "  %sesc  close    ⌫  back%s\n" "$C_SEP" "$C_R"
-    else
-        printf "  %sesc  close%s\n" "$C_SEP" "$C_R"
+    printf "%s%s%s\n" "$C_SEP" "$(printf '─%.0s' $(seq 1 $((width - 2))))" "$C_R"
+    local hint="esc  close"
+    [[ -n "$CURRENT_GROUP" ]] && hint+="    ⌫  back"
+    if [[ $TOTAL_PAGES -gt 1 ]]; then
+        hint+="    ⇥ / ⇧⇥  page $((PAGE + 1))/$TOTAL_PAGES"
     fi
+    printf "  %s%s%s\n" "$C_SEP" "$hint" "$C_R"
+}
+
+# Run a binding by feeding the original tmux command back to tmux, so the
+# quoting tmux printed in list-keys is parsed by tmux itself.
+run_binding() {
+    local cmd="$1"
+    local script
+    script=$(mktemp "${TMPDIR:-/tmp}/which-key.XXXXXX") || return 1
+    printf '%s\n' "$cmd" > "$script"
+
+    # run-shell does not export TMUX_PANE, and a popup is not a pane, so the
+    # target pane is passed explicitly for both paths
+    case "$cmd" in
+        choose-*|command-prompt*|customize-mode*|copy-mode*|display-popup*|confirm-before*)
+            # Let the popup close first, these take over the client themselves
+            tmux run-shell -b "sleep 0.1; TMUX_PANE='$PANE_ID' tmux source-file '$script'; rm -f '$script'"
+            ;;
+        *)
+            TMUX_PANE="$PANE_ID" tmux source-file "$script"
+            rm -f "$script"
+            ;;
+    esac
 }
 
 handle_key() {
-    local keypress="$1"
-    local i=0
+    local token="$1"
+    local i entry_token
 
-    while IFS=$'\t' read -r key type desc command immediate; do
-        local key_char
-        key_char=$(key_to_char "$key")
-
-        if [[ "$key_char" == "$keypress" ]]; then
-            case "$type" in
-                group)
-                    NAV_STACK+=("$i")
-                    return 0
-                    ;;
-                action)
-                    tmux send-keys -t "$PANE_ID" -l "$command"
-                    if [[ "$immediate" == "true" ]]; then
-                        tmux send-keys -t "$PANE_ID" Enter
+    if [[ -z "$CURRENT_GROUP" ]]; then
+        local group
+        for group in "${GROUP_IDS[@]}"; do
+            if [[ "${GROUP_KEYS[$group]}" == "$token" ]]; then
+                for i in "${!BIND_GROUPS[@]}"; do
+                    if [[ "${BIND_GROUPS[$i]}" == "$group" ]]; then
+                        CURRENT_GROUP="$group"
+                        PAGE=0
+                        return 0
                     fi
-                    exit 0
-                    ;;
-                popup)
-                    local pane_path
-                    pane_path=$(tmux display-message -t "$PANE_ID" -p '#{pane_current_path}')
-                    tmux run-shell -b "sleep 0.1 && tmux display-popup -E -h 80% -w 80% -d '$pane_path' '$command'"
-                    exit 0
-                    ;;
-                tmux)
-                    case "$command" in
-                        choose-*|command-prompt*|customize-mode*|copy-mode*)
-                            tmux run-shell -b "sleep 0.1 && tmux $command"
-                            ;;
-                        *)
-                            tmux $command
-                            ;;
-                    esac
-                    exit 0
-                    ;;
-                script)
-                    tmux run-shell "$command"
-                    exit 0
-                    ;;
-            esac
+                done
+            fi
+        done
+        return 0
+    fi
+
+    for i in "${!BIND_KEYS[@]}"; do
+        [[ "${BIND_GROUPS[$i]}" == "$CURRENT_GROUP" ]] || continue
+        key_to_token "${BIND_KEYS[$i]}"
+        entry_token="$KEY_TOKEN"
+        if [[ "$entry_token" == "$token" ]]; then
+            run_binding "${BIND_CMDS[$i]}"
+            exit 0
         fi
-        ((i++))
-    done < <(get_current_items)
+    done
 }
 
-# Main loop
+load_overrides
+load_bindings
+
+# --dump prints the parsed bindings and exits, for inspecting the grouping
+if [[ $DUMP -eq 1 ]]; then
+    for i in "${!BIND_KEYS[@]}"; do
+        printf '%s\t%s\t%s\t%s\n' \
+            "${BIND_GROUPS[$i]}" "${BIND_KEYS[$i]}" "${BIND_DESCS[$i]}" "${BIND_CMDS[$i]}"
+    done
+    exit 0
+fi
+
 while true; do
     render_menu
 
-    IFS= read -rsn1 keypress
+    read_key || exit 0
 
-    # Escape
-    if [[ "$keypress" == $'\x1b' ]]; then
-        read -rsn1 -t 0.1 seq1 || true
-        if [[ -z "$seq1" ]]; then
-            if [[ ${#NAV_STACK[@]} -gt 0 ]]; then
-                unset 'NAV_STACK[${#NAV_STACK[@]}-1]'
+    case "$KEY_TOKEN" in
+        Escape)
+            exit 0
+            ;;
+        $'\x7f'|$'\x08')
+            if [[ -n "$CURRENT_GROUP" ]]; then
+                CURRENT_GROUP=""
+                PAGE=0
             else
                 exit 0
             fi
-        fi
-        continue
+            continue
+            ;;
+        "")
+            continue
+            ;;
+    esac
+
+    # Tab and Shift-Tab page through a level that does not fit on screen. They
+    # only page while there is more than one page, so a bound Tab still works.
+    if [[ $TOTAL_PAGES -gt 1 ]]; then
+        case "$KEY_TOKEN" in
+            $'\t')
+                PAGE=$(( (PAGE + 1) % TOTAL_PAGES ))
+                continue
+                ;;
+            BTab)
+                PAGE=$(( (PAGE + TOTAL_PAGES - 1) % TOTAL_PAGES ))
+                continue
+                ;;
+        esac
     fi
 
-    # Backspace
-    if [[ "$keypress" == $'\x7f' || "$keypress" == $'\x08' ]]; then
-        if [[ ${#NAV_STACK[@]} -gt 0 ]]; then
-            unset 'NAV_STACK[${#NAV_STACK[@]}-1]'
-        else
-            exit 0
-        fi
-        continue
-    fi
-
-    # Regular key
-    if [[ -n "$keypress" ]]; then
-        handle_key "$keypress"
-    fi
+    handle_key "$KEY_TOKEN"
 done

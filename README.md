@@ -13,7 +13,7 @@
 > Bug reports and feature requests will most likely go unanswered — please don't
 > take it personally.
 
-A LazyVim-style which-key popup for tmux. Press a trigger key to open a discoverable, keyboard-driven command menu with nested groups, breadcrumb navigation, and Nord-themed colors.
+A LazyVim-style which-key popup for tmux. Press a trigger key to open a discoverable, keyboard-driven menu of **your own tmux key bindings**, grouped by what they do, with breadcrumb navigation and Nord-themed colors.
 
 ![Nord theme](https://img.shields.io/badge/theme-Nord-88C0D0?style=flat-square)
 ![tmux](https://img.shields.io/badge/tmux-3.3+-green?style=flat-square)
@@ -22,19 +22,20 @@ A LazyVim-style which-key popup for tmux. Press a trigger key to open a discover
 
 ## Features
 
-- **Discoverable keybindings** - see all available commands at a glance
-- **Nested groups** - organize commands hierarchically (git, window, session, etc.)
+- **Built from your real tmux config** - the menu is generated from `tmux list-keys`, so it always shows the bindings you actually have, including plugin and custom ones
+- **Automatic grouping** - bindings are sorted into window / pane / session / layout / buffer / misc by the tmux command they run
+- **Real descriptions** - uses the `bind-key -N` notes tmux ships with, and falls back to the command itself
+- **Faithful execution** - the selected binding is handed back to tmux verbatim, so format strings like `#{pane_current_path}` and interactive commands behave exactly as when typed
 - **Breadcrumb navigation** - always know where you are in the menu tree
 - **Nord color theme** - clean, readable color scheme using 24-bit true color
-- **JSON configuration** - easy to customize, extend, and share
-- **Five action types** - shell commands (with optional auto-execute), tmux commands, external scripts, popups, and nested groups
+- **Optional JSON overrides** - rename, regroup, or hide individual keys
 - **Single-keystroke input** - no Enter key required, instant response
 
 ## Requirements
 
-- tmux >= 3.3 (for `display-popup` support)
-- `jq` (for JSON parsing)
+- tmux >= 3.3 (for `display-popup` support); tmux >= 3.1 for the `-N` binding notes used as descriptions
 - A terminal with true color (24-bit) support
+- `jq` - only needed if you use an optional overrides file
 
 ## Installation
 
@@ -90,17 +91,54 @@ If you use Nix and Flakes, you can add this plugin to your [Home Manager](https:
 }
 ```
 
-**Note:** Ensure `jq` is available in your system path, as it is required for JSON parsing.
+**Note:** `jq` is only needed if you use an optional overrides file; the menu itself works without it.
 
 ## Usage
 
 Press `prefix + Space` (default) to open the which-key popup.
 
-- **Press a key** to execute the corresponding command or enter a group
+The root menu lists groups; pressing a group key shows the real tmux bindings in
+that group.
+
+- **Press a key** to run the corresponding tmux binding, or to enter a group
 - **Escape** to go back one level or close the menu
 - **Backspace** to go back one level or close the menu
+- **Tab** / **Shift-Tab** to page forward and back when a group does not fit on
+  screen
 
-Groups are indicated by a `+` prefix and shown in cyan. Pressing a group key opens its submenu with a breadcrumb showing your navigation path.
+A key always works even when it is on another page, so paging is only needed to
+look a binding up, never to run one.
+
+Groups are indicated by a `+` prefix and shown in cyan, with the number of
+bindings they contain. The breadcrumb shows the key table and the current group.
+
+### Where the menu comes from
+
+The menu is not a hand-written list. On every open the plugin reads the live key
+table with `tmux list-keys -T prefix`, so it shows exactly the bindings your tmux
+config defines - defaults, your own `bind-key` lines, and anything other plugins
+add.
+
+- **Descriptions** come from the `bind-key -N` note tmux records for a binding.
+  Bindings without a note fall back to showing the tmux command itself.
+- **Groups** are derived from the tmux command a binding runs:
+
+  | Group | Bindings running commands such as |
+  |-------|-----------------------------------|
+  | `window` | `new-window`, `select-window`, `kill-window`, `find-window`, ... |
+  | `pane` | `split-window`, `select-pane`, `resize-pane`, `swap-pane`, ... |
+  | `session` | `new-session`, `detach-client`, `switch-client`, `choose-tree`, ... |
+  | `layout` | `select-layout`, `next-layout`, `previous-layout` |
+  | `buffer` | `copy-mode`, `paste-buffer`, `choose-buffer`, `save-buffer`, ... |
+  | `misc` | everything else |
+
+  Wrappers are looked through, so `confirm-before ... kill-pane` lands in `pane`
+  and `command-prompt ... rename-session` lands in `session`.
+- **Execution** hands the original tmux command back to tmux via `source-file`,
+  so quoting and format strings such as `#{pane_current_path}` are parsed by tmux
+  itself. Commands that take over the client - `choose-*`, `command-prompt`,
+  `copy-mode`, `customize-mode`, `display-popup`, `confirm-before` - are deferred
+  slightly so the which-key popup closes first.
 
 ## Configuration
 
@@ -111,20 +149,26 @@ Set these in your `~/.tmux.conf` before loading the plugin:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `@which-key-trigger` | `Space` | Key binding (after prefix) to open the menu |
-| `@which-key-config` | _(auto-detected)_ | Path to a custom JSON config file |
-| `@which-key-popup-height` | `16` | Popup height in lines |
-| `@which-key-popup-width` | `100` | Popup width in characters |
+| `@which-key-table` | `prefix` | tmux key table to show (`prefix`, `root`, `copy-mode-vi`, ...) |
+| `@which-key-config` | _(auto-detected)_ | Path to an optional JSON overrides file |
+| `@which-key-popup-height` | `60%` | Popup height (lines or percentage) |
+| `@which-key-popup-width` | `90%` | Popup width (characters or percentage) |
 | `@which-key-popup-bg` | `#2E3440` | Popup background color |
 | `@which-key-popup-fg` | `#4C566A` | Popup border/foreground color |
 | `@which-key-popup-x` | `C` | Popup X position (`C` = centered) |
 | `@which-key-popup-y` | `S` | Popup Y position (`S` = status line) |
 
+A real key table holds far more entries than a hand-written menu, which is why
+the popup defaults to a share of the terminal. If a group still does not fit, the
+footer shows a page counter and **Tab** / **Shift-Tab** page through it; raising
+`@which-key-popup-height` shows more at once.
+
 Example:
 
 ```tmux
 set -g @which-key-config '~/.config/tmux-which-key/config.json'
-set -g @which-key-popup-height '20'
-set -g @which-key-popup-width '120'
+set -g @which-key-popup-height '70%'
+set -g @which-key-popup-width '95%'
 set -g @plugin 'Nucc/tmux-which-key'
 ```
 
@@ -139,179 +183,89 @@ To bind `Ctrl-Space` directly (no prefix needed):
 set -g @which-key-trigger 'None'
 
 # Bind Ctrl-Space directly (-n = no prefix)
-bind-key -n C-Space run-shell 'tmux display-popup -E -h 16 -w 100 -x C -y S -S "fg=#4C566A" -s "bg=#2E3440" "~/.tmux/plugins/tmux-which-key/scripts/which-key.sh #{pane_id}"'
+bind-key -n C-Space run-shell 'tmux display-popup -E -h 60% -w 90% -x C -y S -S "fg=#4C566A" -s "bg=#2E3440" "~/.tmux/plugins/tmux-which-key/scripts/which-key.sh --table prefix #{pane_id}"'
 ```
 
-To use a custom config with a manual binding:
+To use an overrides file with a manual binding:
 
 ```tmux
-bind-key -n C-Space run-shell 'tmux display-popup -E -h 16 -w 100 -x C -y S -S "fg=#4C566A" -s "bg=#2E3440" "~/.tmux/plugins/tmux-which-key/scripts/which-key.sh --config ~/.config/tmux-which-key/config.json #{pane_id}"'
+bind-key -n C-Space run-shell 'tmux display-popup -E -h 60% -w 90% -x C -y S -S "fg=#4C566A" -s "bg=#2E3440" "~/.tmux/plugins/tmux-which-key/scripts/which-key.sh --config ~/.config/tmux-which-key/config.json #{pane_id}"'
 ```
 
-### Custom Config File
+### Overrides File (optional)
 
-The plugin looks for a config file in this order:
+Nothing needs to be configured - the menu works from your tmux config alone. An
+overrides file only fills in what tmux cannot tell us: a nicer description for a
+binding that has no `-N` note, a different group, or keys to leave out.
+
+The plugin looks for it in this order:
 
 1. Path set via `@which-key-config` tmux option
 2. `$XDG_CONFIG_HOME/tmux-which-key/config.json` (usually `~/.config/tmux-which-key/config.json`)
 3. `~/.tmux-which-key.json`
-4. Plugin's built-in `configs/default.json`
 
-To create your own config:
+To start from the shipped example:
 
 ```bash
 mkdir -p ~/.config/tmux-which-key
-cp ~/.tmux/plugins/tmux-which-key/configs/default.json ~/.config/tmux-which-key/config.json
+cp ~/.tmux/plugins/tmux-which-key/configs/example.json ~/.config/tmux-which-key/config.json
 ```
 
-Then edit `~/.config/tmux-which-key/config.json` to your liking.
+| Field | Type | Description |
+|-------|------|-------------|
+| `descriptions` | object | Key name → label. Overrides the `bind-key -N` note. |
+| `groups` | object | Key name → group id (`window`, `pane`, `session`, `layout`, `buffer`, `misc`). |
+| `hide` | array | Key names to leave out of the menu. |
 
-### Config File Format
-
-The config file is a JSON object with a top-level `items` array. Each item has:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `key` | string | yes | Single character that triggers this item |
-| `type` | string | yes | One of: `group`, `action`, `tmux`, `script`, `popup` |
-| `description` | string | yes | Label shown in the menu |
-| `command` | string | for non-groups | Command to execute |
-| `items` | array | for groups | Nested items in this group |
-| `immediate` | boolean | no | For `action` type: also press Enter after pasting (default: `false`) |
-
-### Action Types
-
-| Type | Behavior | Example |
-|------|----------|---------|
-| `group` | Opens a submenu with nested items | Navigate to git commands |
-| `action` | Sends text to the active pane (as if typed). With `"immediate": true`, also presses Enter. | `git status` |
-| `tmux` | Executes a tmux command directly | `split-window -h` |
-| `script` | Runs a shell script via `tmux run-shell` | `~/scripts/my-script.sh` |
-| `popup` | Opens command in a temporary `display-popup` at the pane's working directory. Closes on exit or Escape. | `lazygit` |
-
-### Example Config
+Key names are written as they appear in the menu - for example `|`, `#`, `C-p`,
+`M-1`, `Space`, `PPage`. Run the script with `--dump` (see below) to see the exact
+name of every key.
 
 ```json
 {
-  "items": [
-    {
-      "key": "g",
-      "type": "group",
-      "description": "git",
-      "items": [
-        { "key": "s", "type": "action", "command": "git status", "description": "Status", "immediate": true },
-        { "key": "c", "type": "action", "command": "git commit", "description": "Commit" },
-        { "key": "g", "type": "popup", "command": "lazygit", "description": "Lazygit" }
-      ]
-    },
-    {
-      "key": "w",
-      "type": "group",
-      "description": "window",
-      "items": [
-        { "key": "v", "type": "tmux", "command": "split-window -h -c '#{pane_current_path}'", "description": "Split vertical" },
-        { "key": "s", "type": "tmux", "command": "split-window -v -c '#{pane_current_path}'", "description": "Split horizontal" }
-      ]
-    },
-    { "key": "r", "type": "tmux", "command": "source-file ~/.tmux.conf \\; display-message 'Config reloaded'", "description": "Reload config" },
-    { "key": "h", "type": "popup", "command": "htop", "description": "System monitor" },
-    { "key": "d", "type": "script", "command": "~/scripts/deploy.sh", "description": "Deploy" }
-  ]
+  "descriptions": {
+    "|": "Split vertical",
+    "_": "Split horizontal",
+    "r": "Reload tmux config"
+  },
+  "groups": {
+    "r": "misc"
+  },
+  "hide": ["Space", "C-Space"]
 }
 ```
 
-## Default Keybindings
+### Adding Your Own Entries
 
-The built-in default config provides ~75 commands organized into 8 groups plus standalone items. Press `prefix + Space` to open the root menu:
+There is no plugin-specific place to add commands any more - add a normal tmux
+binding and it shows up in the menu. Give it a note with `-N` so it gets a
+readable description:
 
-### Root Menu
+```tmux
+bind-key -N "Lazygit" g display-popup -E -d "#{pane_current_path}" -w 90% -h 90% lazygit
+bind-key -N "Split vertical" | split-window -h -c "#{pane_current_path}"
+```
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `p` | group | **Pane** - split, navigate, zoom, swap, resize, and more |
-| `w` | group | **Window** - create, kill, rename, find, navigate, move |
-| `s` | group | **Session** - create, detach, choose, rename, kill, switch |
-| `b` | group | **Buffer** - list, paste, choose, save/load, copy mode |
-| `l` | group | **Layout** - cycle layouts and select presets |
-| `C` | group | **Client** - list, choose, detach, refresh, lock |
-| `o` | group | **Options** - show/set options, environment, messages |
-| `g` | group | **Git** - status, diff, log, push, pull, branches, fetch, add, commit, rebase |
-| `:` | tmux | Command prompt |
-| `r` | tmux | Reload tmux config |
-| `?` | tmux | List all keybindings |
-| `c` | action | Clear screen |
-| `t` | tmux | Clock mode |
-| `d` | tmux | Display panes |
+### Inspecting What The Menu Sees
 
-### Pane (`p`)
+`--dump` prints the parsed table - group, key, description, command - without
+opening the menu:
 
-| Key | Description | Key | Description |
-|-----|-------------|-----|-------------|
-| `v` | Split vertical | `s` | Split horizontal |
-| `h/j/k/l` | Navigate panes | `z` | Zoom toggle |
-| `x` | Kill pane | `o` | Last pane |
-| `!` | Break to window | `J` | Join pane |
-| `m/M` | Mark/unmark pane | `{/}` | Swap up/down |
-| `c` | Clear history | `q` | Capture to buffer |
-| `p` | Respawn pane | `r` | **+Resize** (subgroup) |
+```bash
+~/.tmux/plugins/tmux-which-key/scripts/which-key.sh --dump
+~/.tmux/plugins/tmux-which-key/scripts/which-key.sh --table copy-mode-vi --dump
+```
 
-### Window (`w`)
+## Limitations
 
-| Key | Description | Key | Description |
-|-----|-------------|-----|-------------|
-| `n` | New window | `x` | Kill window |
-| `r` | Rename | `f` | Find window |
-| `l` | Last window | `.` | Next window |
-| `,` | Previous window | `w` | Choose window |
-| `m` | Move window | `s` | Swap window |
-| `R` | Rotate panes | | |
-
-### Session (`s`)
-
-| Key | Description | Key | Description |
-|-----|-------------|-----|-------------|
-| `n` | New session | `d` | Detach |
-| `s` | Choose session | `w` | Choose tree |
-| `r` | Rename | `k` | Kill session |
-| `l` | List sessions | `L` | Lock session |
-| `(` | Previous session | `)` | Next session |
-
-### Buffer (`b`)
-
-| Key | Description | Key | Description |
-|-----|-------------|-----|-------------|
-| `l` | List buffers | `p` | Paste |
-| `c` | Choose buffer | `d` | Delete buffer |
-| `s` | Save to file | `L` | Load from file |
-| `v` | Show buffer | `y` | Copy mode |
-| `C` | Capture pane | | |
-
-### Layout (`l`)
-
-| Key | Description | Key | Description |
-|-----|-------------|-----|-------------|
-| `n` | Next layout | `p` | Previous layout |
-| `1` | Even horizontal | `2` | Even vertical |
-| `3` | Main horizontal | `4` | Main vertical |
-| `5` | Tiled | | |
-
-### Client (`C`)
-
-| Key | Description | Key | Description |
-|-----|-------------|-----|-------------|
-| `l` | List clients | `c` | Choose client |
-| `d` | Detach | `D` | Detach other |
-| `r` | Refresh | `s` | Suspend |
-| `L` | Lock | | |
-
-### Options (`o`)
-
-| Key | Description | Key | Description |
-|-----|-------------|-----|-------------|
-| `g` | Show global options | `w` | Show window options |
-| `e` | Show environment | `s` | Set global option |
-| `c` | Customize mode | `m` | Show messages |
-| `k` | List commands | | |
+- Only keys the popup can read are selectable: printable characters, `C-<letter>`,
+  `M-<char>`, arrows, `PPage`/`NPage`, `Home`/`End`, `Ins`/`Del` and function keys.
+  Other named keys are listed but cannot be triggered from the menu.
+- Bindings without a `bind-key -N` note show their raw tmux command until you give
+  them a description in the overrides file.
+- The menu is two levels deep: groups, then bindings.
+- While a level spans several pages, `Tab` and `Shift-Tab` page instead of running
+  a binding on those keys. With a single page they run the binding as usual.
 
 ## License
 

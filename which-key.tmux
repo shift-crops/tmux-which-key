@@ -23,11 +23,16 @@ main() {
     local config
     config=$(get_tmux_option "@which-key-config" "")
 
+    local table
+    table=$(get_tmux_option "@which-key-table" "prefix")
+
+    # Real tmux key tables hold far more entries than a hand written menu,
+    # so the popup defaults to a share of the terminal instead of 16 lines
     local popup_height
-    popup_height=$(get_tmux_option "@which-key-popup-height" "16")
+    popup_height=$(get_tmux_option "@which-key-popup-height" "60%")
 
     local popup_width
-    popup_width=$(get_tmux_option "@which-key-popup-width" "100")
+    popup_width=$(get_tmux_option "@which-key-popup-width" "90%")
 
     local popup_bg
     popup_bg=$(get_tmux_option "@which-key-popup-bg" "#2E3440")
@@ -41,10 +46,10 @@ main() {
     local popup_y
     popup_y=$(get_tmux_option "@which-key-popup-y" "S")
 
-    # Build config flag
-    local config_flag=""
+    # Build script flags
+    local script_flags="--table $table"
     if [[ -n "$config" ]]; then
-        config_flag="--config $config"
+        script_flags+=" --config $config"
     fi
 
     # Build popup command
@@ -52,7 +57,7 @@ main() {
     popup_cmd+=" -h $popup_height -w $popup_width"
     popup_cmd+=" -x $popup_x -y $popup_y"
     popup_cmd+=" -S 'fg=$popup_fg' -s 'bg=$popup_bg'"
-    popup_cmd+=" '$CURRENT_DIR/scripts/which-key.sh $config_flag #{pane_id}'"
+    popup_cmd+=" '$CURRENT_DIR/scripts/which-key.sh $script_flags #{pane_id}'"
 
     tmux bind-key "$trigger" run-shell "$popup_cmd"
 }

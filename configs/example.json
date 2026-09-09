@@ -1,0 +1,36 @@
+{
+  "_comment": [
+    "Optional overrides for tmux-which-key.",
+    "The menu itself is built from the live tmux key bindings (tmux list-keys),",
+    "so this file only fills in what tmux cannot tell us.",
+    "Place it at $XDG_CONFIG_HOME/tmux-which-key/config.json,",
+    "at ~/.tmux-which-key.json, or point @which-key-config at it."
+  ],
+
+  "_descriptions": "Text shown next to a key. Overrides the bind-key -N note, and gives a description to bindings that have none (they fall back to the raw command).",
+  "descriptions": {
+    "|": "Split vertical",
+    "\\": "Split vertical",
+    "_": "Split horizontal",
+    "h": "Select left",
+    "j": "Select down",
+    "k": "Select up",
+    "l": "Select right",
+    "r": "Reload tmux config",
+    "e": "Enable pane sync",
+    "E": "Disable pane sync"
+  },
+
+  "_groups": "Move a key into another group. Valid values: window, pane, session, layout, buffer, misc.",
+  "groups": {
+    "r": "misc",
+    "e": "pane",
+    "E": "pane"
+  },
+
+  "_hide": "Keys to leave out of the menu entirely.",
+  "hide": [
+    "Space",
+    "C-Space"
+  ]
+}
