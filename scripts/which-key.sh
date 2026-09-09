@@ -80,6 +80,41 @@ get_breadcrumb() {
     echo "${parts[*]}"
 }
 
+# Convert key notation to actual character
+# E.g., "C-p" -> actual Ctrl+P character
+key_to_char() {
+    local key="$1"
+    case "$key" in
+        C-a) printf '\x01' ;;
+        C-b) printf '\x02' ;;
+        C-c) printf '\x03' ;;
+        C-d) printf '\x04' ;;
+        C-e) printf '\x05' ;;
+        C-f) printf '\x06' ;;
+        C-g) printf '\x07' ;;
+        C-h) printf '\x08' ;;
+        C-i) printf '\x09' ;;
+        C-j) printf '\x0a' ;;
+        C-k) printf '\x0b' ;;
+        C-l) printf '\x0c' ;;
+        C-m) printf '\x0d' ;;
+        C-n) printf '\x0e' ;;
+        C-o) printf '\x0f' ;;
+        C-p) printf '\x10' ;;
+        C-q) printf '\x11' ;;
+        C-r) printf '\x12' ;;
+        C-s) printf '\x13' ;;
+        C-t) printf '\x14' ;;
+        C-u) printf '\x15' ;;
+        C-v) printf '\x16' ;;
+        C-w) printf '\x17' ;;
+        C-x) printf '\x18' ;;
+        C-y) printf '\x19' ;;
+        C-z) printf '\x1a' ;;
+        *) printf '%s' "$key" ;;
+    esac
+}
+
 render_menu() {
     clear
 
@@ -148,7 +183,10 @@ handle_key() {
     local i=0
 
     while IFS=$'\t' read -r key type desc command immediate; do
-        if [[ "$key" == "$keypress" ]]; then
+        local key_char
+        key_char=$(key_to_char "$key")
+
+        if [[ "$key_char" == "$keypress" ]]; then
             case "$type" in
                 group)
                     NAV_STACK+=("$i")
