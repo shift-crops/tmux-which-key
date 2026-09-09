@@ -26,6 +26,9 @@ main() {
     local table
     table=$(get_tmux_option "@which-key-table" "prefix")
 
+    local cache
+    cache=$(get_tmux_option "@which-key-cache" "off")
+
     # Real tmux key tables hold far more entries than a hand written menu,
     # so the popup defaults to a share of the terminal instead of 16 lines
     local popup_height
@@ -46,10 +49,17 @@ main() {
     local popup_y
     popup_y=$(get_tmux_option "@which-key-popup-y" "S")
 
+    # tmux re-runs this file on every config reload, so dropping the cache
+    # here is what keeps a cached menu in step with the tmux config
+    rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/tmux-which-key"/*.cache 2>/dev/null
+
     # Build script flags
     local script_flags="--table $table"
     if [[ -n "$config" ]]; then
         script_flags+=" --config $config"
+    fi
+    if [[ "$cache" == "on" ]]; then
+        script_flags+=" --cache"
     fi
 
     # Build popup command

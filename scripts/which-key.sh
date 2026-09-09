@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tmux-which-key - LazyVim-style which-key popup for tmux
-# Usage: which-key.sh [--config <path>] [--table <name>] <pane_id>
+# Usage: which-key.sh [--config <path>] [--table <name>] [--cache] <pane_id>
+#        which-key.sh --clear-cache
 #
 # The menu is built from the live tmux key bindings (tmux list-keys) so it
 # always reflects the user's real tmux configuration. An optional JSON file
@@ -12,6 +13,8 @@ CONFIG_FILE=""
 KEY_TABLE="prefix"
 PANE_ID=""
 DUMP=0
+CACHE=0
+CLEAR_CACHE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -25,6 +28,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --dump)
             DUMP=1
+            shift
+            ;;
+        --cache)
+            CACHE=1
+            shift
+            ;;
+        --no-cache)
+            CACHE=0
+            shift
+            ;;
+        --clear-cache)
+            CLEAR_CACHE=1
             shift
             ;;
         *)
@@ -45,6 +60,17 @@ if [[ -z "$CONFIG_FILE" ]]; then
     fi
 fi
 
+# Parsing the whole key table costs far more than asking tmux for it, so the
+# result can be cached. which-key.tmux clears the cache every time it runs,
+# which is on every tmux config reload.
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/tmux-which-key"
+CACHE_FILE="$CACHE_DIR/${KEY_TABLE//[^A-Za-z0-9_-]/_}.cache"
+
+if [[ $CLEAR_CACHE -eq 1 ]]; then
+    rm -f "$CACHE_DIR"/*.cache 2>/dev/null
+    exit 0
+fi
+
 # Nord theme colors
 C_KEY=$'\033[38;2;235;203;139m'       # #EBCB8B - yellow
 C_GRP=$'\033[38;2;136;192;208m'       # #88C0D0 - cyan
@@ -54,7 +80,7 @@ C_HDR=$'\033[38;2;129;161;193m'       # #81A1C1 - blue
 C_R=$'\033[0m'
 
 if [[ -z "$PANE_ID" && $DUMP -eq 0 ]]; then
-    echo "Usage: which-key.sh [--config <path>] [--table <name>] <pane_id>"
+    echo "Usage: which-key.sh [--config <path>] [--table <name>] [--cache] <pane_id>"
     exit 1
 fi
 
@@ -64,28 +90,32 @@ declare -A GROUP_KEYS=(
     [window]=w [pane]=p [session]=s [layout]=l [buffer]=b [misc]=m
 )
 
+# The group functions assign to GROUP_RESULT rather than echoing, so
+# classifying a hundred bindings does not fork a subshell per word
+GROUP_RESULT=""
+
 # Map a tmux command to a group id
 group_of_command() {
     case "$1" in
         new-window|next-window|previous-window|select-window|rename-window|\
 kill-window|last-window|find-window|move-window|swap-window|link-window|\
 unlink-window|respawn-window|list-windows)
-            echo window ;;
+            GROUP_RESULT=window ;;
         split-window|select-pane|resize-pane|kill-pane|swap-pane|break-pane|\
 join-pane|move-pane|display-panes|last-pane|respawn-pane|pipe-pane|\
 capture-pane|rotate-window)
-            echo pane ;;
+            GROUP_RESULT=pane ;;
         new-session|attach-session|detach-client|kill-session|rename-session|\
 switch-client|list-sessions|suspend-client|refresh-client|lock-client|\
 lock-server|choose-client|choose-session|choose-tree|kill-server)
-            echo session ;;
+            GROUP_RESULT=session ;;
         select-layout|next-layout|previous-layout)
-            echo layout ;;
+            GROUP_RESULT=layout ;;
         copy-mode|paste-buffer|list-buffers|delete-buffer|choose-buffer|\
 show-buffer|set-buffer|save-buffer|load-buffer|clear-history)
-            echo buffer ;;
+            GROUP_RESULT=buffer ;;
         *)
-            echo "" ;;
+            GROUP_RESULT="" ;;
     esac
 }
 
@@ -93,17 +123,17 @@ show-buffer|set-buffer|save-buffer|load-buffer|clear-history)
 # and command-prompt are skipped so the wrapped command decides the group.
 group_of() {
     local cmd="$1"
-    local word group flags
+    local word flags
 
     case "$cmd" in
         # A menu body mentions many commands, so classify it by what its
         # title formats refer to instead of by the commands it contains
         display-menu*)
             case "$cmd" in
-                *'#{pane_'*) echo pane ;;
-                *'#{window_'*) echo window ;;
-                *'#{session_'*) echo session ;;
-                *) echo misc ;;
+                *'#{pane_'*) GROUP_RESULT=pane ;;
+                *'#{window_'*) GROUP_RESULT=window ;;
+                *'#{session_'*) GROUP_RESULT=session ;;
+                *) GROUP_RESULT=misc ;;
             esac
             return
             ;;
@@ -113,28 +143,19 @@ group_of() {
             flags="${flags# }"
             flags="${flags%% *}"
             if [[ "$flags" == -*w* ]]; then
-                echo window
+                GROUP_RESULT=window
             else
-                echo session
+                GROUP_RESULT=session
             fi
             return
             ;;
     esac
 
     for word in $cmd; do
-        group=$(group_of_command "$word")
-        if [[ -n "$group" ]]; then
-            echo "$group"
-            return
-        fi
+        group_of_command "$word"
+        [[ -n "$GROUP_RESULT" ]] && return
     done
-    echo misc
-}
-
-# tmux escapes key names such as \# and \; in list-keys output
-unescape_key() {
-    local key="$1"
-    printf '%s' "${key#\\}"
+    GROUP_RESULT=misc
 }
 
 declare -A NOTES=() OVR_DESC=() OVR_GROUP=() HIDDEN=()
@@ -175,13 +196,19 @@ load_bindings() {
     local re='^bind-key[[:space:]]+(-[a-zA-Z][[:space:]]+)*-T[[:space:]]+[^[:space:]]+[[:space:]]+([^[:space:]]+)[[:space:]]+(.*)$'
     while IFS= read -r line; do
         [[ "$line" =~ $re ]] || continue
-        key=$(unescape_key "${BASH_REMATCH[2]}")
+        # tmux escapes key names such as \# and \; in list-keys output
+        key="${BASH_REMATCH[2]#\\}"
         cmd="${BASH_REMATCH[3]}"
 
         [[ -n "${HIDDEN[$key]:-}" ]] && continue
 
         desc="${OVR_DESC[$key]:-${NOTES[$key]:-$cmd}}"
-        group="${OVR_GROUP[$key]:-$(group_of "$cmd")}"
+        if [[ -n "${OVR_GROUP[$key]:-}" ]]; then
+            group="${OVR_GROUP[$key]}"
+        else
+            group_of "$cmd"
+            group="$GROUP_RESULT"
+        fi
         [[ -n "${GROUP_KEYS[$group]:-}" ]] || group=misc
 
         BIND_KEYS+=("$key")
@@ -477,8 +504,45 @@ handle_key() {
     done
 }
 
+# Records are separated by \x1f: tmux prints one binding per line, but a
+# command may well contain a tab.
+load_cache() {
+    [[ $CACHE -eq 1 && -s "$CACHE_FILE" ]] || return 1
+    # An overrides file edited since the cache was written invalidates it
+    [[ -n "$CONFIG_FILE" && "$CONFIG_FILE" -nt "$CACHE_FILE" ]] && return 1
+
+    local key cmd desc group
+    while IFS=$'\x1f' read -r key cmd desc group; do
+        [[ -n "$key" && -n "$group" ]] || continue
+        BIND_KEYS+=("$key")
+        BIND_CMDS+=("$cmd")
+        BIND_DESCS+=("$desc")
+        BIND_GROUPS+=("$group")
+    done < "$CACHE_FILE"
+
+    [[ ${#BIND_KEYS[@]} -gt 0 ]]
+}
+
+save_cache() {
+    [[ $CACHE -eq 1 && ${#BIND_KEYS[@]} -gt 0 ]] || return 0
+    mkdir -p "$CACHE_DIR" 2>/dev/null || return 0
+
+    # Written via a temporary file so a second popup never reads a half
+    # written cache
+    local tmp="$CACHE_FILE.$$"
+    local i
+    for i in "${!BIND_KEYS[@]}"; do
+        printf '%s\x1f%s\x1f%s\x1f%s\n' \
+            "${BIND_KEYS[$i]}" "${BIND_CMDS[$i]}" "${BIND_DESCS[$i]}" "${BIND_GROUPS[$i]}"
+    done > "$tmp" 2>/dev/null && mv -f "$tmp" "$CACHE_FILE" 2>/dev/null
+    rm -f "$tmp" 2>/dev/null
+}
+
 load_overrides
-load_bindings
+if ! load_cache; then
+    load_bindings
+    save_cache
+fi
 
 # --dump prints the parsed bindings and exits, for inspecting the grouping
 if [[ $DUMP -eq 1 ]]; then

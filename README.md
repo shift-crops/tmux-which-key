@@ -29,6 +29,7 @@ A LazyVim-style which-key popup for tmux. Press a trigger key to open a discover
 - **Breadcrumb navigation** - always know where you are in the menu tree
 - **Nord color theme** - clean, readable color scheme using 24-bit true color
 - **Optional JSON overrides** - rename, regroup, or hide individual keys
+- **Optional caching** - reuse the parsed key table between popups, dropped whenever the tmux config is reloaded
 - **Single-keystroke input** - no Enter key required, instant response
 
 ## Requirements
@@ -151,6 +152,7 @@ Set these in your `~/.tmux.conf` before loading the plugin:
 | `@which-key-trigger` | `Space` | Key binding (after prefix) to open the menu |
 | `@which-key-table` | `prefix` | tmux key table to show (`prefix`, `root`, `copy-mode-vi`, ...) |
 | `@which-key-config` | _(auto-detected)_ | Path to an optional JSON overrides file |
+| `@which-key-cache` | `off` | Set to `on` to cache the parsed key table between popups |
 | `@which-key-popup-height` | `60%` | Popup height (lines or percentage) |
 | `@which-key-popup-width` | `90%` | Popup width (characters or percentage) |
 | `@which-key-popup-bg` | `#2E3440` | Popup background color |
@@ -172,6 +174,28 @@ set -g @which-key-popup-width '95%'
 set -g @plugin 'Nucc/tmux-which-key'
 ```
 
+### Caching
+
+Reading the key table costs a few milliseconds; turning it into the menu costs
+rather more. With `@which-key-cache` set to `on` the parsed table is written to
+`$XDG_CACHE_HOME/tmux-which-key/<table>.cache` and reused by later popups.
+
+```tmux
+set -g @which-key-cache 'on'
+```
+
+The cache is dropped when:
+
+- **the tmux config is reloaded** - tmux re-runs `which-key.tmux`, which clears
+  the cache directory, so a reload always rebuilds the menu
+- **the overrides file is edited** - the cache is ignored once it is older than
+  the file it was built from
+- **you ask it to** - `scripts/which-key.sh --clear-cache`
+
+A binding added at runtime with a bare `bind-key`, without a config reload, is
+not picked up until the cache is cleared. If you would rather not think about it,
+leave caching off; the menu is built from scratch in a few tens of milliseconds.
+
 ### Custom Key Binding
 
 By default the plugin binds `prefix + Space`. You can override this with `@which-key-trigger`, or create your own binding entirely in `~/.tmux.conf`.
@@ -190,6 +214,15 @@ To use an overrides file with a manual binding:
 
 ```tmux
 bind-key -n C-Space run-shell 'tmux display-popup -E -h 60% -w 90% -x C -y S -S "fg=#4C566A" -s "bg=#2E3440" "~/.tmux/plugins/tmux-which-key/scripts/which-key.sh --config ~/.config/tmux-which-key/config.json #{pane_id}"'
+```
+
+A hand-written binding does not go through `@which-key-cache`; add `--cache` to
+the script arguments to enable it, and clear the cache from `~/.tmux.conf`
+itself, which tmux re-runs on every reload:
+
+```tmux
+run-shell '~/.tmux/plugins/tmux-which-key/scripts/which-key.sh --clear-cache'
+bind-key -n C-Space run-shell 'tmux display-popup -E -h 60% -w 90% -x C -y S -S "fg=#4C566A" -s "bg=#2E3440" "~/.tmux/plugins/tmux-which-key/scripts/which-key.sh --cache #{pane_id}"'
 ```
 
 ### Overrides File (optional)
@@ -266,6 +299,8 @@ opening the menu:
 - The menu is two levels deep: groups, then bindings.
 - While a level spans several pages, `Tab` and `Shift-Tab` page instead of running
   a binding on those keys. With a single page they run the binding as usual.
+- With caching on, bindings created at runtime without a config reload only show
+  up after `--clear-cache`.
 
 ## License
 
