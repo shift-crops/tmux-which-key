@@ -1,18 +1,5 @@
 # tmux-which-key
 
-> ## ⚠️ Unmaintained — looking for a new maintainer
->
-> This project was just an experiment. It works, but I have no time to develop or
-> maintain it any further, so it is **not actively maintained**.
->
-> **If you want to take it over, please do!** Feel free to fork it and carry it
-> forward — you don't need my permission. If you open an issue or a pull request
-> to let me know, I'm happy to link your fork here as the official successor so
-> that people land on the maintained version instead of this one.
->
-> Bug reports and feature requests will most likely go unanswered — please don't
-> take it personally.
-
 A LazyVim-style which-key popup for tmux. Press a trigger key to open a discoverable, keyboard-driven menu of **your own tmux key bindings**, grouped by what they do, with breadcrumb navigation and Nord-themed colors.
 
 ![Nord theme](https://img.shields.io/badge/theme-Nord-88C0D0?style=flat-square)
@@ -45,7 +32,7 @@ A LazyVim-style which-key popup for tmux. Press a trigger key to open a discover
 Add to your `~/.tmux.conf`:
 
 ```tmux
-set -g @plugin 'Nucc/tmux-which-key'
+set -g @plugin 'shift-crops/tmux-which-key'
 ```
 
 Then press `prefix + I` to install.
@@ -55,7 +42,7 @@ Then press `prefix + I` to install.
 Clone the repository:
 
 ```bash
-git clone https://github.com/Nucc/tmux-which-key.git ~/.tmux/plugins/tmux-which-key
+git clone https://github.com/shift-crops/tmux-which-key.git ~/.tmux/plugins/tmux-which-key
 ```
 
 Add to your `~/.tmux.conf`:
@@ -78,7 +65,7 @@ If you use Nix and Flakes, you can add this plugin to your [Home Manager](https:
 
 ```nix
 {
-  inputs.tmux-which-key.url = "github:Nucc/tmux-which-key";
+  inputs.tmux-which-key.url = "github:shift-crops/tmux-which-key";
 }
 ```
 
@@ -174,7 +161,7 @@ Example:
 set -g @which-key-config '~/.config/tmux-which-key/config.json'
 set -g @which-key-popup-height '70%'
 set -g @which-key-popup-width '95%'
-set -g @plugin 'Nucc/tmux-which-key'
+set -g @plugin 'shift-crops/tmux-which-key'
 ```
 
 ### Caching
