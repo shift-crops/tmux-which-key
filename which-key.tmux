@@ -68,7 +68,26 @@ main() {
     popup_cmd+=" -S 'fg=$popup_fg' -s 'bg=$popup_bg'"
     popup_cmd+=" '$CURRENT_DIR/scripts/which-key.sh $script_flags #{pane_id}'"
 
+    # Reloading tmux.conf rebinds the trigger but does not drop bindings, so a
+    # changed trigger would otherwise leave the old key running an outdated
+    # command line. Only a key still pointing at this plugin is removed.
+    local prev_trigger
+    prev_trigger=$(get_tmux_option "@which-key-bound-trigger" "")
+    if [[ -n "$prev_trigger" && "$prev_trigger" != "$trigger" ]]; then
+        if tmux list-keys -T prefix "$prev_trigger" 2>/dev/null |
+                grep -qF "$CURRENT_DIR/scripts/which-key.sh"; then
+            tmux unbind-key -T prefix "$prev_trigger"
+        fi
+    fi
+
+    # "None" is not a tmux key name; it means the user binds the popup herself
+    if [[ "$trigger" == "None" || "$trigger" == "none" ]]; then
+        tmux set-option -gu @which-key-bound-trigger
+        return
+    fi
+
     tmux bind-key "$trigger" run-shell "$popup_cmd"
+    tmux set-option -g @which-key-bound-trigger "$trigger"
 }
 
 main

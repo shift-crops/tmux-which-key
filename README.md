@@ -203,6 +203,12 @@ leave caching off; the menu is built from scratch in a few tens of milliseconds.
 
 By default the plugin binds `prefix + Space`. You can override this with `@which-key-trigger`, or create your own binding entirely in `~/.tmux.conf`.
 
+Changing the trigger removes the key the plugin bound last time, as long as that
+key still runs this plugin - tmux keeps old bindings across a config reload, so
+without this an abandoned trigger would linger and run an outdated command line.
+A key you have rebound yourself is never touched. Setting the trigger to `None`
+unbinds it and binds nothing.
+
 To bind `Ctrl-Space` directly (no prefix needed):
 
 ```tmux
