@@ -29,13 +29,12 @@ main() {
     local cache
     cache=$(get_tmux_option "@which-key-cache" "off")
 
-    # Real tmux key tables hold far more entries than a hand written menu,
-    # so the popup defaults to a share of the terminal instead of 16 lines
+    # Both take lines and columns or a percentage of the terminal
     local popup_height
-    popup_height=$(get_tmux_option "@which-key-popup-height" "60%")
+    popup_height=$(get_tmux_option "@which-key-popup-height" "16")
 
     local popup_width
-    popup_width=$(get_tmux_option "@which-key-popup-width" "90%")
+    popup_width=$(get_tmux_option "@which-key-popup-width" "100")
 
     local popup_bg
     popup_bg=$(get_tmux_option "@which-key-popup-bg" "#2E3440")

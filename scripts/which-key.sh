@@ -10,6 +10,7 @@
 set -uo pipefail
 
 CONFIG_FILE=""
+CONFIG_EXPLICIT=0
 KEY_TABLE="prefix"
 PANE_ID=""
 DUMP=0
@@ -20,6 +21,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --config)
             CONFIG_FILE="$2"
+            CONFIG_EXPLICIT=1
             shift 2
             ;;
         --table)
@@ -48,6 +50,10 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# tmux hands the @which-key-config value over unexpanded, and the popup command
+# is quoted, so a leading ~ arrives here literally
+CONFIG_FILE="${CONFIG_FILE/#\~\//$HOME/}"
 
 # Resolve override file: explicit > XDG > user home (no built-in default)
 if [[ -z "$CONFIG_FILE" ]]; then
@@ -84,11 +90,53 @@ if [[ -z "$PANE_ID" && $DUMP -eq 0 ]]; then
     exit 1
 fi
 
-# Group ids in display order, with the key that opens them
+# Group ids in display order, with the key that opens them. An overrides file
+# may name a group that is not in this list; it is added on the fly.
 GROUP_IDS=(window pane session layout buffer misc)
 declare -A GROUP_KEYS=(
     [window]=w [pane]=p [session]=s [layout]=l [buffer]=b [misc]=m
 )
+declare -A GROUP_KEY_TAKEN=([w]=1 [p]=1 [s]=1 [l]=1 [b]=1 [m]=1)
+
+# Claim the first free key for a new group: a letter of its own name where
+# possible, so the key stays memorable, otherwise any key still free
+claim_group_key() {
+    local name="$1"
+    local i ch
+
+    for ch in "${name,,}" "${name^^}"; do
+        for ((i = 0; i < ${#ch}; i++)); do
+            local c="${ch:i:1}"
+            [[ "$c" == [A-Za-z0-9] ]] || continue
+            if [[ -z "${GROUP_KEY_TAKEN[$c]:-}" ]]; then
+                printf '%s' "$c"
+                return 0
+            fi
+        done
+    done
+
+    for ch in {a..z} {A..Z} {0..9}; do
+        if [[ -z "${GROUP_KEY_TAKEN[$ch]:-}" ]]; then
+            printf '%s' "$ch"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Add a group named by the overrides file. Returns non-zero when the name is
+# unusable or no key is left, so the caller can fall back to misc.
+register_group() {
+    local name="$1"
+    [[ -n "$name" ]] || return 1
+    [[ -n "${GROUP_KEYS[$name]:-}" ]] && return 0
+
+    local key
+    key=$(claim_group_key "$name") || return 1
+    GROUP_KEYS["$name"]="$key"
+    GROUP_KEY_TAKEN["$key"]=1
+    GROUP_IDS+=("$name")
+}
 
 # The group functions assign to GROUP_RESULT rather than echoing, so
 # classifying a hundred bindings does not fork a subshell per word
@@ -160,22 +208,45 @@ group_of() {
 
 declare -A NOTES=() OVR_DESC=() OVR_GROUP=() HIDDEN=()
 
+# Shown in the header when an explicitly requested overrides file is unusable,
+# so a wrong path does not just silently produce a menu without overrides
+CONFIG_WARNING=""
+
 load_overrides() {
-    [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]] || return 0
-    command -v jq >/dev/null 2>&1 || return 0
+    if [[ -n "$CONFIG_FILE" && ! -f "$CONFIG_FILE" ]]; then
+        [[ $CONFIG_EXPLICIT -eq 1 ]] && CONFIG_WARNING="overrides not found: $CONFIG_FILE"
+        return 0
+    fi
+    [[ -n "$CONFIG_FILE" ]] || return 0
+    if ! command -v jq >/dev/null 2>&1; then
+        CONFIG_WARNING="jq not found, overrides ignored"
+        return 0
+    fi
 
-    local k v
-    while IFS=$'\t' read -r k v; do
-        [[ -n "$k" ]] && OVR_DESC["$k"]="$v"
-    done < <(jq -r '(.descriptions // {}) | to_entries[] | [.key, .value] | @tsv' "$CONFIG_FILE" 2>/dev/null)
+    if ! jq -e 'type == "object"' "$CONFIG_FILE" >/dev/null 2>&1; then
+        CONFIG_WARNING="overrides must be a JSON object keyed by key name: $CONFIG_FILE"
+        return 0
+    fi
 
-    while IFS=$'\t' read -r k v; do
-        [[ -n "$k" ]] && OVR_GROUP["$k"]="$v"
-    done < <(jq -r '(.groups // {}) | to_entries[] | [.key, .value] | @tsv' "$CONFIG_FILE" 2>/dev/null)
-
-    while IFS= read -r k; do
-        [[ -n "$k" ]] && HIDDEN["$k"]=1
-    done < <(jq -r '(.hide // [])[]' "$CONFIG_FILE" 2>/dev/null)
+    # One record per override as three raw lines: tag, key, value. @tsv would
+    # escape the backslash key and any tab, and the escapes would never match
+    # a key name.
+    local tag k v
+    while IFS= read -r tag && IFS= read -r k && IFS= read -r v; do
+        [[ -n "$k" ]] || continue
+        case "$tag" in
+            D) OVR_DESC["$k"]="$v" ;;
+            G) register_group "$v" && OVR_GROUP["$k"]="$v" ;;
+            H) HIDDEN["$k"]=1 ;;
+        esac
+    done < <(jq -r '
+        to_entries[]
+        | .key as $k
+        | .value
+        | (if has("description") then ("D", $k, .description) else empty end),
+          (if has("group") then ("G", $k, .group) else empty end),
+          (if .hide == true then ("H", $k, "") else empty end)
+    ' "$CONFIG_FILE" 2>/dev/null)
 }
 
 # Parallel arrays of the bindings in the table, in tmux's own order
@@ -383,6 +454,8 @@ render_menu() {
     local breadcrumb="$KEY_TABLE"
     [[ -n "$CURRENT_GROUP" ]] && breadcrumb="$KEY_TABLE > $CURRENT_GROUP"
 
+    [[ -n "$CONFIG_WARNING" ]] && breadcrumb+="  ($CONFIG_WARNING)"
+
     printf "%s  Which Key%s  %s│%s  %s%s%s\n" "$C_HDR" "$C_R" "$C_SEP" "$C_R" "$C_DESC" "$breadcrumb" "$C_R"
     printf "%s%s%s\n" "$C_SEP" "$(printf '─%.0s' $(seq 1 $((width - 2))))" "$C_R"
 
@@ -511,6 +584,12 @@ load_cache() {
     # An overrides file edited since the cache was written invalidates it
     [[ -n "$CONFIG_FILE" && "$CONFIG_FILE" -nt "$CACHE_FILE" ]] && return 1
 
+    local header
+    IFS= read -r header < "$CACHE_FILE"
+    # The cache holds descriptions and groups after overrides, so it belongs to
+    # the overrides file it was built from
+    [[ "$header" == "#$CONFIG_FILE" ]] || return 1
+
     local key cmd desc group
     while IFS=$'\x1f' read -r key cmd desc group; do
         [[ -n "$key" && -n "$group" ]] || continue
@@ -518,7 +597,7 @@ load_cache() {
         BIND_CMDS+=("$cmd")
         BIND_DESCS+=("$desc")
         BIND_GROUPS+=("$group")
-    done < "$CACHE_FILE"
+    done < <(tail -n +2 "$CACHE_FILE")
 
     [[ ${#BIND_KEYS[@]} -gt 0 ]]
 }
@@ -531,10 +610,11 @@ save_cache() {
     # written cache
     local tmp="$CACHE_FILE.$$"
     local i
+    printf '#%s\n' "$CONFIG_FILE" > "$tmp" 2>/dev/null || return 0
     for i in "${!BIND_KEYS[@]}"; do
         printf '%s\x1f%s\x1f%s\x1f%s\n' \
             "${BIND_KEYS[$i]}" "${BIND_CMDS[$i]}" "${BIND_DESCS[$i]}" "${BIND_GROUPS[$i]}"
-    done > "$tmp" 2>/dev/null && mv -f "$tmp" "$CACHE_FILE" 2>/dev/null
+    done >> "$tmp" 2>/dev/null && mv -f "$tmp" "$CACHE_FILE" 2>/dev/null
     rm -f "$tmp" 2>/dev/null
 }
 

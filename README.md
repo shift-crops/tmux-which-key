@@ -133,6 +133,9 @@ add.
   | `buffer` | `copy-mode`, `paste-buffer`, `choose-buffer`, `save-buffer`, ... |
   | `misc` | everything else |
 
+  An overrides file can move a key into another group, and can name a group of
+  its own that is not in this table.
+
   Wrappers are looked through, so `confirm-before ... kill-pane` lands in `pane`
   and `command-prompt ... rename-session` lands in `session`.
 - **Execution** hands the original tmux command back to tmux via `source-file`,
@@ -153,17 +156,17 @@ Set these in your `~/.tmux.conf` before loading the plugin:
 | `@which-key-table` | `prefix` | tmux key table to show (`prefix`, `root`, `copy-mode-vi`, ...) |
 | `@which-key-config` | _(auto-detected)_ | Path to an optional JSON overrides file |
 | `@which-key-cache` | `off` | Set to `on` to cache the parsed key table between popups |
-| `@which-key-popup-height` | `60%` | Popup height (lines or percentage) |
-| `@which-key-popup-width` | `90%` | Popup width (characters or percentage) |
+| `@which-key-popup-height` | `16` | Popup height (lines or percentage) |
+| `@which-key-popup-width` | `100` | Popup width (characters or percentage) |
 | `@which-key-popup-bg` | `#2E3440` | Popup background color |
 | `@which-key-popup-fg` | `#4C566A` | Popup border/foreground color |
 | `@which-key-popup-x` | `C` | Popup X position (`C` = centered) |
 | `@which-key-popup-y` | `S` | Popup Y position (`S` = status line) |
 
-A real key table holds far more entries than a hand-written menu, which is why
-the popup defaults to a share of the terminal. If a group still does not fit, the
-footer shows a page counter and **Tab** / **Shift-Tab** page through it; raising
-`@which-key-popup-height` shows more at once.
+A real key table holds far more entries than a hand-written menu, so a group
+often does not fit at the default size. The footer then shows a page counter and
+**Tab** / **Shift-Tab** page through it; a larger line count, or a percentage
+such as `60%`, shows more at once.
 
 Example:
 
@@ -244,29 +247,45 @@ mkdir -p ~/.config/tmux-which-key
 cp ~/.tmux/plugins/tmux-which-key/configs/example.json ~/.config/tmux-which-key/config.json
 ```
 
+The file is a JSON object keyed by key name, one entry per key you want to
+change:
+
+```json
+{
+  "|": { "description": "Split vertical" },
+  "_": { "description": "Split horizontal" },
+  "e": { "description": "Enable pane sync", "group": "pane" },
+  "Space": { "hide": true }
+}
+```
+
 | Field | Type | Description |
 |-------|------|-------------|
-| `descriptions` | object | Key name → label. Overrides the `bind-key -N` note. |
-| `groups` | object | Key name → group id (`window`, `pane`, `session`, `layout`, `buffer`, `misc`). |
-| `hide` | array | Key names to leave out of the menu. |
+| `description` | string | Label to show. Overrides the `bind-key -N` note. |
+| `group` | string | Group to file the key under - one of the built-in ids, or a new name |
+| `hide` | boolean | `true` leaves the key out of the menu entirely |
+
+Every field is optional; anything you leave out keeps its default, so an entry
+can set a description, a group, both, or neither.
+
+A `group` that is not one of the built-in ids (`window`, `pane`, `session`,
+`layout`, `buffer`, `misc`) creates a new group, listed after the built-in ones.
+Its menu key is the first free letter of its own name - `tools` gets `t`,
+`plugins` gets `u` because `p` and `l` are taken - falling back to any free key
+if the whole name is spoken for. Group names are case sensitive, and an empty
+name falls back to `misc`.
+
+```json
+{
+  "I":   { "description": "TPM install", "group": "plugins" },
+  "U":   { "description": "TPM update",  "group": "plugins" },
+  "M-u": { "description": "TPM clean",   "group": "plugins" }
+}
+```
 
 Key names are written as they appear in the menu - for example `|`, `#`, `C-p`,
 `M-1`, `Space`, `PPage`. Run the script with `--dump` (see below) to see the exact
 name of every key.
-
-```json
-{
-  "descriptions": {
-    "|": "Split vertical",
-    "_": "Split horizontal",
-    "r": "Reload tmux config"
-  },
-  "groups": {
-    "r": "misc"
-  },
-  "hide": ["Space", "C-Space"]
-}
-```
 
 ### Adding Your Own Entries
 
